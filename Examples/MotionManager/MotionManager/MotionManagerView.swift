@@ -19,8 +19,15 @@ struct AppEnvironment {
   var motionClient: MotionClient
 }
 
-let appReducer = Reducer<AppState, AppAction, AppEnvironment> { state, action, environment in
+let appReducer = Reducer<AppState, AppAction, AppEnvironment>(subscriptions: { state, environment in
   struct MotionClientId: Hashable {}
+  if state.isRecording {
+    return [MotionClientId(): environment.motionClient.deviceMotionUpdates().catchToEffect().map(AppAction.motionClient)]
+  } else {
+    return [:]
+  }
+  
+}) { state, action, environment in
 
   switch action {
   case .alertDismissed:
@@ -43,17 +50,11 @@ let appReducer = Reducer<AppState, AppAction, AppEnvironment> { state, action, e
     return .none
 
   case .onAppear:
-    return environment.motionClient.create(id: MotionClientId())
-      .catchToEffect()
-      .map(AppAction.motionClient)
+    return .none
 
   case .recordingButtonTapped:
     state.isRecording.toggle()
-    return state.isRecording
-      ? environment.motionClient.startDeviceMotionUpdates(id: MotionClientId())
-        .fireAndForget()
-      : environment.motionClient.stopDeviceMotionUpdates(id: MotionClientId())
-        .fireAndForget()
+    return .none
   }
 }
 
@@ -115,18 +116,20 @@ func plot(buffer: [Double], scale: Double) -> Path {
   }
 }
 
-struct AppView_Previews: PreviewProvider {
-  static var previews: some View {
-    AppView(
-      store: Store(
-        initialState: AppState(
-          isRecording: false,
-          z: (1...350)
-            .map { sin(Double($0) / 10) }
-        ),
-        reducer: appReducer,
-        environment: .init(motionClient: .live)
+#if DEBUG
+  struct AppView_Previews: PreviewProvider {
+    static var previews: some View {
+      AppView(
+        store: Store(
+          initialState: AppState(
+            isRecording: false,
+            z: (1...350)
+              .map { sin(Double($0) / 10) }
+          ),
+          reducer: appReducer,
+          environment: .init(motionClient: .live)
+        )
       )
-    )
+    }
   }
-}
+#endif

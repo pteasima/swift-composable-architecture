@@ -17,6 +17,7 @@ import Combine
 ///   must be on the main thread. You can use the `Publisher` method `receive(on:)` for make the
 ///   effect output its values on the thread of your choice.
 public struct Reducer<State, Action, Environment> {
+  let subscriptions: (State, Environment) -> [AnyHashable: Effect<Action, Never>]
   private let reducer: (inout State, Action, Environment) -> Effect<Action, Never>
 
   /// Initializes a reducer from a simple reducer function signature.
@@ -46,13 +47,14 @@ public struct Reducer<State, Action, Environment> {
   ///
   /// - Parameter reducer: A function signature that takes state, action and
   ///   environment.
-  public init(_ reducer: @escaping (inout State, Action, Environment) -> Effect<Action, Never>) {
+  public init(subscriptions: @escaping (State, Environment) -> [AnyHashable: Effect<Action, Never>] = { _, _ in [:] }, _ reducer: @escaping (inout State, Action, Environment) -> Effect<Action, Never>) {
     self.reducer = reducer
+    self.subscriptions = subscriptions
   }
 
   /// A reducer that performs no state mutations and returns no effects.
   public static var empty: Reducer {
-    Self { _, _, _ in .none }
+    Self(subscriptions: { _,_ in [:] }) { _, _, _ in .none }
   }
 
   /// Combines many reducers into a single one by running each one on the state, and merging all of
@@ -70,7 +72,9 @@ public struct Reducer<State, Action, Environment> {
   /// - Parameter reducers: An array of reducers.
   /// - Returns: A single reducer.
   public static func combine(_ reducers: [Reducer]) -> Reducer {
-    Self { value, action, environment in
+    Self(subscriptions: { value, environment in
+      reducers.map { $0.subscriptions(value, environment) }.reduce(into: [:]) { acc, element in acc.merge(element, uniquingKeysWith: { lhs, rhs in lhs })}
+    }) { value, action, environment in
       .merge(reducers.map { $0.reducer(&value, action, environment) })
     }
   }
@@ -116,7 +120,10 @@ public struct Reducer<State, Action, Environment> {
     action toLocalAction: CasePath<GlobalAction, Action>,
     environment toLocalEnvironment: @escaping (GlobalEnvironment) -> Environment
   ) -> Reducer<GlobalState, GlobalAction, GlobalEnvironment> {
-    .init { globalState, globalAction, globalEnvironment in
+    .init(subscriptions: { globalState, globalEnvironment in
+      self.subscriptions(globalState[keyPath: toLocalState], toLocalEnvironment(globalEnvironment))
+        .mapValues { $0.map(toLocalAction.embed) }
+    }) { globalState, globalAction, globalEnvironment in
       guard let localAction = toLocalAction.extract(from: globalAction) else { return .none }
       return self.reducer(
         &globalState[keyPath: toLocalState],
@@ -154,7 +161,10 @@ public struct Reducer<State, Action, Environment> {
   /// - See also: `Store.ifLet`, a UIKit helper for doing imperative work with a store on optional
   ///   state.
   public var optional: Reducer<State?, Action, Environment> {
-    .init { state, action, environment in
+    .init(subscriptions: { state, environment in
+      guard let state = state else { return [:] }
+      return self.subscriptions(state, environment)
+    }) { state, action, environment in
       guard state != nil else { return .none }
       return self.callAsFunction(&state!, action, environment)
     }
@@ -190,7 +200,16 @@ public struct Reducer<State, Action, Environment> {
     action toLocalAction: CasePath<GlobalAction, (Int, Action)>,
     environment toLocalEnvironment: @escaping (GlobalEnvironment) -> Environment
   ) -> Reducer<GlobalState, GlobalAction, GlobalEnvironment> {
-    .init { globalState, globalAction, globalEnvironment in
+    .init(subscriptions: { globalState, globalEnvironment in
+      let collection = globalState[keyPath: toLocalState]
+      let enumeratedCollection = zip(collection.indices, collection)
+      return enumeratedCollection.map { index, localState in
+              self.subscriptions(localState, toLocalEnvironment(globalEnvironment)).mapValues {
+                $0.map { toLocalAction.embed((index, $0)) }
+              }
+      }.reduce(into: [:]) { acc, element in acc.merge(element, uniquingKeysWith: { lhs, rhs in lhs }) }
+    }) { globalState, globalAction, globalEnvironment in
+
       guard let (index, localAction) = toLocalAction.extract(from: globalAction) else {
         return .none
       }
@@ -234,7 +253,16 @@ public struct Reducer<State, Action, Environment> {
     action toLocalAction: CasePath<GlobalAction, (ID, Action)>,
     environment toLocalEnvironment: @escaping (GlobalEnvironment) -> Environment
   ) -> Reducer<GlobalState, GlobalAction, GlobalEnvironment> {
-    .init { globalState, globalAction, globalEnvironment in
+    .init(subscriptions: { globalState, globalEnvironment in
+      let collection = globalState[keyPath: toLocalState]
+      let identifiedCollection = zip(collection.ids, collection.elements) //is there a better way to map over both?
+      return identifiedCollection.map { id, localState in
+              self.subscriptions(localState, toLocalEnvironment(globalEnvironment)).mapValues {
+                $0.map { toLocalAction.embed((id, $0)) }
+              }
+      }.reduce(into: [:]) { acc, element in acc.merge(element, uniquingKeysWith: { lhs, rhs in lhs }) }
+    }) { globalState, globalAction, globalEnvironment in
+
       guard let (id, localAction) = toLocalAction.extract(from: globalAction) else { return .none }
       return self.optional
         .reducer(
@@ -260,7 +288,15 @@ public struct Reducer<State, Action, Environment> {
     action toLocalAction: CasePath<GlobalAction, (Key, Action)>,
     environment toLocalEnvironment: @escaping (GlobalEnvironment) -> Environment
   ) -> Reducer<GlobalState, GlobalAction, GlobalEnvironment> {
-    .init { globalState, globalAction, globalEnvironment in
+    .init (subscriptions: { globalState, globalEnvironment in
+      let dict = globalState[keyPath: toLocalState]
+      return dict.map { key, localState in
+              self.subscriptions(localState, toLocalEnvironment(globalEnvironment)).mapValues {
+                $0.map { toLocalAction.embed((key, $0)) }
+              }
+      }.reduce(into: [:]) { acc, element in acc.merge(element, uniquingKeysWith: { lhs, rhs in lhs }) }
+    }){ globalState, globalAction, globalEnvironment in
+
       guard let (key, localAction) = toLocalAction.extract(from: globalAction) else { return .none }
       return self.optional
         .reducer(

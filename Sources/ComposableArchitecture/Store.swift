@@ -12,6 +12,8 @@ public final class Store<State, Action> {
   private var isSending = false
   private var parentCancellable: AnyCancellable?
   private let reducer: (inout State, Action) -> Effect<Action, Never>
+  private let subscriptions: (State) -> [AnyHashable: Effect<Action, Never>]
+  private var activeSubscriptions: [AnyHashable: Effect<Action, Never>] = [:]
   private var synchronousActionsToSend: [Action] = []
 
   /// Initializes a store from an initial state, a reducer, and an environment.
@@ -27,7 +29,8 @@ public final class Store<State, Action> {
   ) {
     self.init(
       initialState: initialState,
-      reducer: { reducer.callAsFunction(&$0, $1, environment) }
+      reducer: { reducer.callAsFunction(&$0, $1, environment) },
+      subscriptions: { reducer.subscriptions($0, environment) }
     )
   }
 
@@ -65,7 +68,8 @@ public final class Store<State, Action> {
         self.send(fromLocalAction(localAction))
         localState = toLocalState(self.state)
         return .none
-      }
+      },
+      subscriptions: { _ in [:] }
     )
     localStore.parentCancellable = self.$state
       .sink { [weak localStore] newValue in localStore?.state = toLocalState(newValue) }
@@ -110,7 +114,9 @@ public final class Store<State, Action> {
             self.send(fromLocalAction(localAction))
             localState = extractLocalState(self.state) ?? localState
             return .none
-          })
+          },
+          subscriptions: { _ in [:] }
+        )
 
         localStore.parentCancellable = self.$state
           .sink { [weak localStore] state in
@@ -147,7 +153,20 @@ public final class Store<State, Action> {
       )
     }
     self.isSending = true
-    let effect = self.reducer(&self.state, action)
+    let reducerEffect = self.reducer(&self.state, action)
+    let newSubscriptions = self.subscriptions(self.state)
+    // TODO: this is a temporary placeholder using Stephen's example https://github.com/pointfreeco/swift-composable-architecture/blob/4d4809faf386b0cacf73e62e699352576d8dadb8/Examples/CaseStudies/SwiftUICaseStudies/04-HigherOrderReducers-ElmLikeSubscriptions.swift#L19-L30
+    // this relies on diffing locally and using the standard effect cancellation API to commit the changes
+    // Afaik this isnt enough. There could be a subscription that was returned from both previous and this pass of `self.subscriptions`, so we do nothing here. However, if that subscription completed/failed in the meantime, that means we have to restart it.
+    // I have some ideas how to achieve this:
+    // 1) Best case scenario we add an API to query the state of a running Effect (similar to current effect cancellation API), and decide based on that
+    // 2) Otherwise we might have to manage their lifecycle manually here in Store (which Ive tried in the past but implementation was far from elegant)
+    let subscriptionsEffect = Self.diffSubscriptions(old: self.activeSubscriptions, new: newSubscriptions)
+    self.activeSubscriptions = newSubscriptions
+    let effect = Effect.merge(
+      reducerEffect,
+      subscriptionsEffect
+      )
     self.isSending = false
 
     var didComplete = false
@@ -178,13 +197,30 @@ public final class Store<State, Action> {
       self.send(action)
     }
   }
+  
+  private static func diffSubscriptions(old: [AnyHashable: Effect<Action, Never>], new: [AnyHashable: Effect<Action, Never>]) -> Effect<Action, Never> {
+    .merge(
+      Set(new.keys).union(old.keys).map { id in
+        switch (old[id], new[id]) {
+        case (.some, .none):
+          return .cancel(id: id)
+        case let (.none, .some(effect)):
+          return effect.cancellable(id: id)
+        default:
+          return .none
+        }
+      }
+    )
+  }
 
   private init(
     initialState: State,
-    reducer: @escaping (inout State, Action) -> Effect<Action, Never>
+    reducer: @escaping (inout State, Action) -> Effect<Action, Never>,
+    subscriptions: @escaping (State) -> [AnyHashable: Effect<Action, Never>]
   ) {
     self.reducer = reducer
     self.state = initialState
+    self.subscriptions = subscriptions
   }
 }
 
