@@ -158,4 +158,18 @@ final class EffectTests: XCTestCase {
     XCTAssertEqual(values, [1])
     XCTAssertEqual(isComplete, true)
   }
+  
+  func testPassthroughSubject() {
+    let subject = PassthroughSubject<Never, Never>()
+    var subscribed = false
+    let effect = Effect<Never, Never>.concatenate(
+      subject.eraseToEffect(),
+      Effect.run { _ in
+        subscribed = true
+        return AnyCancellable { }
+      }
+    )
+    _ = effect.sink { _ in } //fine to throw away the cancellable, everything is sync
+    XCTAssertTrue(subscribed)
+  }
 }
